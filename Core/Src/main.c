@@ -24,7 +24,13 @@
 /* USER CODE BEGIN Includes */
 #include "motor.h"
 #include "bsp_can.h"
+#include "bsp_uart.h"
+#include "motor_ctrl.h"
 #include "stdio.h"
+#include "servo_ctrl.h"
+#include "pid.h"
+#include "cmd_parser.h"
+#include "led_ctrl.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -85,47 +91,6 @@ void StartPrintTask(void const * argument);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-uint8_t rx_buf[64];
-uint8_t cmd_buf[64];
-volatile uint16_t cmd_len;
-volatile uint8_t  cmd_ready;
-volatile uint32_t now = 0;
-volatile uint32_t last = 0;
-volatile uint16_t pulldown = 0;
-volatile uint16_t angle = 0;
-volatile uint16_t angle_turn = 0;
-volatile uint16_t tick_ms = 0;
-typedef struct PID_num {
-  volatile int16_t target;
-  volatile float e_prev,de_prev,u_prev;
-  volatile float ki,kp,kd;
-}pid;
-pid pidnum;
-
-void PID_Init(void) {
-  pidnum.kp = 25.0f;
-  pidnum.ki = 80;
-  pidnum.kd = 200.0f;
-  pidnum.target = 0;
-}
-
-void PID_Reset(uint16_t tar) {
-  pidnum.target = tar;
-}
-
-float PID_cal(int16_t speed){
-  float e = pidnum.target - speed;
-  float de = e-pidnum.e_prev;
-  float dde = de - pidnum.de_prev;
-  float du = de*pidnum.kp+pidnum.ki*e*0.001f+pidnum.kd*dde*0.001f;
-  float u = du+pidnum.u_prev;
-  if (u>15000) u = 15000;
-  if (u<-15000) u = -15000;
-  pidnum.e_prev = e;
-  pidnum.de_prev = de;
-  pidnum.u_prev = u;
-  return u;
-}
 /* USER CODE END 0 */
 
 /**
@@ -166,8 +131,8 @@ int main(void)
   BSP_CAN_Init();
   Motor_Init();
   PID_Init();
-  __HAL_UART_ENABLE_IT(&huart6, UART_IT_IDLE);
-  HAL_UART_Receive_DMA(&huart6, rx_buf, 64);
+  Bsp_Uart_Init();
+  Servo_Ctrl_Init();
   /* 上电自检：能收到这行说明 TX 通路和接线没问题 */
   HAL_UART_Transmit(&huart6, (const uint8_t *)"BOOT OK\r\n", 9, 100);
   /* USER CODE END 2 */
@@ -572,11 +537,6 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-  if (GPIO_Pin == KEY_Pin) {
-    pulldown = 1;
-  }
-}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -607,15 +567,11 @@ void StartDefaultTask(void const * argument)
 void StartMotorTask(void const * argument)
 {
   /* USER CODE BEGIN StartMotorTask */
-  int16_t cmd[4] = {0,0,0,0};
-  pidnum.target = 100;
+  Motor_Ctrl_Init();
   /* Infinite loop */
   for(;;)
   {
-    if (pidnum.target != 0) {
-      cmd[0] = PID_cal(motor_gm6020[0].speed_rpm);
-      Motor_SendVoltage(cmd);
-    }
+    Motor_Ctrl_Update();
     osDelay(1);
   }
   /* USER CODE END StartMotorTask */
@@ -634,28 +590,7 @@ void StartUartTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    if (cmd_ready) {
-      cmd_ready = 0;
-      for (uint16_t i =0;i<cmd_len;i++) {
-        int16_t turn=1;
-        if (cmd_buf[i]=='m'&&cmd_buf[i+1]=='o'&&cmd_buf[i+2]=='t'&&cmd_buf[i+3]=='o'&&cmd_buf[i+4]=='r') {
-          if (cmd_buf[i+5]=='-') {turn = -1;}
-          int16_t get_num = 0;
-          if (i+6<cmd_len) {
-            get_num += cmd_buf[i+6]-'0';
-          }
-          if (i+7<cmd_len) {
-            get_num*=10;
-            get_num += cmd_buf[i+7]-'0';
-          }
-          if (i+8<cmd_len) {
-            get_num*=10;
-            get_num += cmd_buf[i+8]-'0';
-          }
-          if (get_num!=0)pidnum.target = get_num*turn;
-        }
-      }
-    }
+    Cmd_Parse_Motor();
     osDelay(1);
   }
   /* USER CODE END StartUartTask */
@@ -672,21 +607,10 @@ void StartServoTask(void const * argument)
 {
   /* USER CODE BEGIN StartServoTask */
   /* Infinite loop */
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 500);
-  angle_turn = 1;
+  Servo_Ctrl_Init();
   for(;;)
   {
-    if (pulldown) {
-      osDelay(20);
-      if (HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin)==GPIO_PIN_SET) {
-        pulldown = 0;
-        if (angle>=180){angle_turn=-1;}
-        if (angle<=0){angle_turn=1;}
-        angle+=20*angle_turn;
-        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 500+angle*2000/180);
-      }
-    }
+    Servo_Ctrl_Update();
     osDelay(1);
   }
   /* USER CODE END StartServoTask */
@@ -703,29 +627,10 @@ void StartLedTask(void const * argument)
 {
   /* USER CODE BEGIN StartLedTask */
   /* Infinite loop */
-  uint16_t last_time = 0;
-  uint16_t pwm_turn = 1;
-  HAL_TIM_PWM_Start(&htim5, TIM_CHANNEL_3);
+  Led_Ctrl_Init();
   for(;;)
   {
-    if (HAL_GetTick()-motor_gm6020[0].last_update_tick>=500&&HAL_GetTick()>1000) {
-      HAL_GPIO_WritePin(GPIOH, GPIO_PIN_11, GPIO_PIN_RESET);
-      if (HAL_GetTick()-last_time>=1000) {
-        last_time = HAL_GetTick();
-        pwm_turn =!pwm_turn;
-      }
-      uint16_t precent = (HAL_GetTick()-last_time)/10;
-      if (precent>100) {precent=100;}
-      if (pwm_turn) {
-        __HAL_TIM_SET_COMPARE(&htim5, TIM_CHANNEL_3, 65535*precent/100);
-      }else {
-        __HAL_TIM_SET_COMPARE(&htim5, TIM_CHANNEL_3, 65535*(100-precent)/100);
-      }
-    }else {
-      __HAL_TIM_SET_COMPARE(&htim5, TIM_CHANNEL_3, 0);
-      HAL_GPIO_WritePin(GPIOH, GPIO_PIN_11, GPIO_PIN_SET);
-      pwm_turn = 1;
-    }
+    Led_Ctrl_Update();
     osDelay(1);
   }
   /* USER CODE END StartLedTask */
@@ -744,13 +649,7 @@ void StartPrintTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    int16_t value = motor_gm6020[0].speed_rpm;
-    char txbuf[16];
-    int n = snprintf(txbuf, sizeof(txbuf), "%d", value);
-    if (n > 0)
-    {
-      HAL_UART_Transmit(&huart6, (uint8_t *)txbuf, (uint16_t)n, 100);
-    }
+    Cmd_Print_Speed();
     osDelay(2000);
   }
   /* USER CODE END StartPrintTask */
@@ -772,10 +671,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   if (htim->Instance == TIM3)
   {
     HAL_IncTick();
-  }
-  if (htim->Instance == TIM6)
-  {
-    tick_ms++;
   }
   /* USER CODE BEGIN Callback 1 */
 

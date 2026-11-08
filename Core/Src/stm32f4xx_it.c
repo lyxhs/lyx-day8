@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "string.h"
+#include "bsp_uart.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,10 +53,7 @@
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-extern uint8_t rx_buf[64];
-extern uint8_t cmd_buf[64];
-extern volatile uint16_t cmd_len;
-extern volatile uint8_t  cmd_ready;
+
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
@@ -258,18 +256,7 @@ void DMA2_Stream6_IRQHandler(void)
 void USART6_IRQHandler(void)
 {
   /* USER CODE BEGIN USART6_IRQn 0 */
-  if (__HAL_UART_GET_FLAG(&huart6, UART_FLAG_IDLE) != RESET)
-  {
-    __HAL_UART_CLEAR_IDLEFLAG(&huart6);
-    uint16_t len = 64 - __HAL_DMA_GET_COUNTER(&hdma_usart6_rx);
-    if (len > 0) {
-      memcpy(cmd_buf, rx_buf, len);
-      cmd_len = len;
-      cmd_ready = 1;
-    }
-    HAL_UART_AbortReceive(&huart6);
-    HAL_UART_Receive_DMA(&huart6, rx_buf, 64);
-  }
+  Bsp_Uart_Idle_Irq();
   /* USER CODE END USART6_IRQn 0 */
   HAL_UART_IRQHandler(&huart6);
   /* USER CODE BEGIN USART6_IRQn 1 */
